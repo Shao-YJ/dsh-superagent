@@ -51,7 +51,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ### Agent GitLab account and token
 
-1. Create a GitLab user account or use a dedicated service account, add it to the project as **Developer** or higher, and create a personal or project access token with `api` and `write_repository` scopes.
+1. Create a GitLab user account or use a dedicated service account, add it to the project as **Developer** or higher, and create a personal or project access token with `api` and `write_repository` scopes. On an instance that permits only one account per person, use your own account and turn on **The account belongs to the person using the agent** on the GitLab card. The Source then treats that account's unmarked Issues, merge requests and comments as direct requests, while the agent's marked replies do not trigger again; commits and merge requests appear under your name.
 2. Store the token in a file only the operator and the dsh-superagent process can read, for example:
 
    ```sh
@@ -60,7 +60,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
    ```
 
    `glab` must be installed; dsh-superagent writes its own wrapper that reads the token file on every invocation. Do not put the token in the GitLab Source form or in a prompt. The account needs a commit email: the Source field overrides the token account's `commit_email` or `email`, and setup refuses to start without one.
-3. Set the instance root URL, the project path (`group/project`), the `glab` command and the token file on the GitLab card.
+3. Set the instance root URL, the project path (`group/project`), the `glab` command and the token file on the GitLab card. If this is your own account rather than a dedicated agent account, turn on **The account belongs to the person using the agent** as well.
 
 ### Feishu bot (optional)
 
@@ -160,7 +160,7 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`, or the GitLab base URL, project path, CLI and token file. Requests normally arrive through the agent account's notifications or GitLab to-dos and project events. A new Issue, merge request or comment mentioning the account arrives on the next poll; adding a mention by editing an existing body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
+1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`, or the GitLab base URL, project path, CLI and token file. Requests normally arrive through the agent account's notifications or GitLab to-dos and project events. A new Issue, merge request or comment mentioning the account arrives on the next poll; adding a mention by editing an existing body does not. Post a new comment instead. In own-account mode the account's own unmarked Issues, merge requests and comments are read even when the broad observation switches are off; its marked replies are not. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
 2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub or GitLab accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
@@ -226,7 +226,7 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:gitlab`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI. GitLab's has `baseUrl`, `project`, `cli`, `tokenFile`, `commitEmail`, `pollSeconds`, `failuresBeforeError` and the switches `observeIssues`, `observeMergeRequests` and `observeComments`; it always reads the agent's to-dos and the project events it can see. Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `source:github`, `source:gitlab`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI. GitLab's has `baseUrl`, `project`, `cli`, `tokenFile`, `commitEmail`, `pollSeconds`, `failuresBeforeError`, the switch `ownAccount` and the switches `observeIssues`, `observeMergeRequests` and `observeComments`; it always reads the agent's to-dos and the project events it can see. Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, `issues`, `mergeRequests` or `comments` for GitLab, and `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
@@ -299,6 +299,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | The log says the plugin is incompatible with the running dsh | Install a DeepSeek Harness version within the `engines.dsh` range |
 | The panel shows "Failed to load plugins" after a DeepSeek Harness upgrade | Restart the running instance |
 | Nothing happens after a mention | Check that the author is on the Source's allowed list, the Source is on, and processing is not paused. On GitHub or GitLab, a mention added by editing an Issue's body is not received; mention the agent in a comment |
+| Your own GitLab Issue or comment is ignored | On a one-account-per-person instance, turn on **The account belongs to the person using the agent**; unmarked self-authored content then becomes a request. If you posted it with `glab` as the agent, add `<!-- dsh-superagent:agent-reply -->` so it is treated as output |
 | `The GitLab Source names no glab CLI and no token file.` | Set `glab` and `tokenFile` on the GitLab card |
 | `The agent GitLab CLI was not found.` | Set the CLI's absolute path, or a command name on `PATH` |
 | `The GitLab token file … cannot be read.` | Give the dsh-superagent process read access to the token file |

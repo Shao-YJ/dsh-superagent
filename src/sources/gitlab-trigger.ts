@@ -70,8 +70,10 @@ export const EventSchema = z.looseObject({
 export type GitlabEvent = z.infer<typeof EventSchema>
 
 const user = (candidate: GitlabUser): Trigger['actor'] => ({ source: SOURCE, id: candidate.username })
-const author = (candidate: GitlabUser, agent: string): { actor: Trigger['actor']; human: boolean } =>
-  ({ actor: user(candidate), human: isHumanUser(candidate) && candidate.username !== agent })
+const author = (candidate: GitlabUser, agent: string, own = false): { actor: Trigger['actor']; human: boolean } =>
+  ({ actor: user(candidate), human: isHumanUser(candidate) && (own || candidate.username !== agent) })
+/** True when a note carries the host's or a worker's agent marker; such a note is output, never a request. */
+export const agentNote = (note: Pick<GitlabNote, 'body'>): boolean => /<!--\s*dsh-superagent:/i.test(note.body)
 /** True when `text` mentions `@login` as a whole username. */
 export const mentions = (text: string, login: string): boolean =>
   new RegExp(`(?:^|[^a-zA-Z0-9_@])@${escapeRegExp(login)}(?![a-zA-Z0-9_-])`, 'i').test(text)
@@ -82,30 +84,32 @@ const assigned = (kind: GitlabKind, iid: number, subject: { title: string; descr
   `@${author.username} assigned ${kind === 'mr' ? 'merge request' : 'issue'} ${kind === 'mr' ? '!' : '#'}${iid} "${subject.title}" to the agent${subject.description ? `\n\n${subject.description}` : ''}`
 /** Builds the Trigger for an Issue or Merge Request being opened or assigned to the agent. */
 export function subjectTrigger(kind: GitlabKind, subject: GitlabIssue | GitlabMergeRequest, action: 'opened' | 'assigned',
-  deployment: Pick<Deployment, 'gitlab'>, agent: string, actor?: GitlabUser, ref?: number): Trigger {
+  deployment: Pick<Deployment, 'gitlab'>, agent: string, actor?: GitlabUser, ref?: number, own = false): Trigger {
   const iid = subject.iid
   const who = actor ?? subject.author
   // Use the event or to-do id when there is one, so a later re-assignment is a new Trigger; an opened subject falls back to its creation time.
   const identity = ref !== undefined ? String(ref) : action === 'opened' ? subject.created_at : subject.updated_at ?? subject.created_at
+  const self = own && who.username === agent
   return { id: key('gitlab-subject', `${kind}:${iid}:${action}:${who.username}`, identity), source: SOURCE,
-    threads: [gitlabRef(kind, iid)], ...author(who, agent), at: subject.updated_at ?? subject.created_at,
+    threads: [gitlabRef(kind, iid)], ...author(who, agent, self), at: subject.updated_at ?? subject.created_at,
     text: action === 'opened' ? opened(kind, iid, subject, who) : assigned(kind, iid, subject, who),
-    ...action === 'assigned' ? { addressed: 'direct' as const }
+    ...action === 'assigned' || self ? { addressed: 'direct' as const }
       : mentions(`${subject.title}\n${subject.description ?? ''}`, agent) ? { addressed: 'mention' as const } : {},
     channel: gitlabChannel(kind, iid), url: subject.web_url || gitlabPage(deployment, kind, iid),
     meta: { kind, iid, author: who.username, title: title(subject.title), action } }
 }
 /** Builds the Trigger for a Note on an Issue or Merge Request; `discussion` carries an MR code review thread. */
 export function noteTrigger(kind: GitlabKind, iid: number, note: GitlabNote, subject: { title: string; web_url: string }, agent: string,
-  discussion?: string): Trigger {
+  discussion?: string, own = false): Trigger {
   const url = `${subject.web_url}#note_${note.id}`
+  const self = own && note.author.username === agent
   return { id: key('gitlab-note', `${kind}:${iid}`, String(note.id)), source: SOURCE, threads: [gitlabRef(kind, iid)],
-    ...author(note.author, agent), at: note.created_at, text: note.body, channel: gitlabChannel(kind, iid, discussion), url,
-    ...mentions(note.body, agent) ? { addressed: 'mention' as const } : {},
+    ...author(note.author, agent, self), at: note.created_at, text: note.body, channel: gitlabChannel(kind, iid, discussion), url,
+    ...self || mentions(note.body, agent) ? { addressed: self ? 'direct' as const : 'mention' as const } : {},
     meta: { kind, iid, noteId: note.id, discussionId: discussion, author: note.author.username, title: title(subject.title) } }
 }
 /** Builds a Trigger from a project event that carries an Issue, Merge Request or Note. */
-export function eventTrigger(event: GitlabEvent, deployment: Pick<Deployment, 'gitlab'>, agent: string): Trigger | undefined {
+export function eventTrigger(event: GitlabEvent, deployment: Pick<Deployment, 'gitlab'>, agent: string, own = false): Trigger | undefined {
   const type = event.target_type
   const author = event.author ?? event.note?.author
   if (!author || !event.target_iid) return undefined
@@ -115,13 +119,13 @@ export function eventTrigger(event: GitlabEvent, deployment: Pick<Deployment, 'g
     const noteable = note.noteable_type === 'MergeRequest' ? 'mr' : 'issue'
     const iid = note.noteable_iid ?? event.target_iid
     const subject = { title: titleText, web_url: `${gitlabPage(deployment, noteable, iid)}` }
-    return noteTrigger(noteable, iid, note, subject, agent)
+    return noteTrigger(noteable, iid, note, subject, agent, undefined, own)
   }
   if ((type === 'Issue' || type === 'MergeRequest') && (event.action_name === 'opened' || event.action_name === 'assigned')) {
     const kind: GitlabKind = type === 'Issue' ? 'issue' : 'mr'
     const subject = { iid: event.target_iid, title: titleText, description: null, author, created_at: event.created_at,
       updated_at: event.created_at, web_url: gitlabPage(deployment, kind, event.target_iid), state: 'opened' }
-    return subjectTrigger(kind, subject as GitlabIssue, event.action_name === 'assigned' ? 'assigned' : 'opened', deployment, agent, author, event.id)
+    return subjectTrigger(kind, subject as GitlabIssue, event.action_name === 'assigned' ? 'assigned' : 'opened', deployment, agent, author, event.id, own)
   }
   return undefined
 }

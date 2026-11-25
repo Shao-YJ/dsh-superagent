@@ -44,12 +44,16 @@ describe('GitLab thread keys and triggers', () => {
     expect(mention).toMatchObject({ source: 'gitlab', threads: [{ source: 'gitlab', id: 'mr:7' }], addressed: 'mention',
       human: true, channel: { source: 'gitlab', thread: 'gitlab:mr:7', address: { kind: 'mr', iid: '7', discussion: 'disc1' } } })
     expect(noteTrigger('mr', 7, note(56, 'agent-bot', 'done'), MR, 'agent-bot').human).toBe(false)
+    expect(noteTrigger('mr', 7, note(57, 'agent-bot', 'please fix'), MR, 'agent-bot', undefined, true))
+      .toMatchObject({ human: true, addressed: 'direct' })
     expect(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot')).toMatchObject({ addressed: 'direct', human: true })
     expect(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 9, username: 'lead' }))
       .toMatchObject({ actor: { source: 'gitlab', id: 'lead' }, addressed: 'direct' })
     expect(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 9, username: 'lead' }, 1).id)
       .not.toBe(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 9, username: 'lead' }, 2).id)
-    const issue = { ...MR, iid: 8, title: 'Bug', state: 'opened' }
+    const issue = { ...MR, iid: 8, title: 'Bug', state: 'opened', author: { username: 'agent-bot' } }
+    expect(subjectTrigger('issue', issue, 'opened', deployment, 'agent-bot', undefined, undefined, true))
+      .toMatchObject({ human: true, addressed: 'direct' })
     expect(subjectTrigger('issue', issue, 'opened', deployment, 'agent-bot').threads).toEqual([{ source: 'gitlab', id: 'issue:8' }])
   })
   it('finds bare numbers and GitLab page URLs but not a GitHub Issue URL', () => {
@@ -111,6 +115,43 @@ describe('GitLab polling', () => {
     expect(done).toEqual([3])
     expect(store.get('gitlab-cursor:gitlab:mr:7')).toEqual(expect.any(String))
     expect(patches.some(([key, meta]) => key === 'gitlab:mr:7' && meta.title === 'Add support')).toBe(true)
+  })
+  it("accepts the person's own Issue and unmarked notes in own-account mode, but not its marked output", async () => {
+    const received: Trigger[] = []
+    const at = new Date(Date.now() + 3_600_000).toISOString()
+    const issue = { id: 80, iid: 8, title: 'Bug', description: 'Fix it.', state: 'opened',
+      author: { username: 'agent-bot' }, created_at: at, updated_at: at,
+      web_url: 'https://gitlab.example.com/team/app/-/issues/8' }
+    const request = { ...note(56, 'agent-bot', 'please fix', at), noteable_type: 'MergeRequest', noteable_iid: 7 }
+    const output = { ...note(57, 'agent-bot', 'done\n\n<!-- dsh-superagent:agent-reply -->', at),
+      noteable_type: 'MergeRequest', noteable_iid: 7 }
+    const events = [
+      { id: 1, action_name: 'opened', target_type: 'Issue', target_iid: 8, target_title: 'Bug', created_at: at,
+        author: { username: 'agent-bot' } },
+      { id: 2, action_name: 'created', target_type: 'Note', target_iid: 7, target_title: 'Add support', created_at: at,
+        author: { username: 'agent-bot' }, note: request },
+      { id: 3, action_name: 'created', target_type: 'Note', target_iid: 7, target_title: 'Add support', created_at: at,
+        author: { username: 'agent-bot' }, note: output },
+    ]
+    const commands = {
+      withSignal: () => commands,
+      gitlabTodos: vi.fn(async () => []),
+      gitlabApi: vi.fn(async (first: unknown, path?: string) => {
+        const resource = typeof first === 'string' ? first : path
+        if (resource?.startsWith('events')) return events
+        if (resource === 'issues/8') return issue
+        if (resource === 'merge_requests/7') return MR
+        if (resource?.startsWith('merge_requests?')) return []
+        throw new Error(`unexpected GitLab call ${String(resource)}`)
+      }),
+    } as unknown as Commands
+    const context = fakeContext({ commands, received,
+      config: { ownAccount: true, observeIssues: false, observeMergeRequests: false, observeComments: false } })
+    await pollRound(context)
+    expect(received).toHaveLength(2)
+    expect(received[0]).toMatchObject({ meta: { kind: 'issue', iid: 8 }, human: true, addressed: 'direct' })
+    expect(received[1]).toMatchObject({ meta: { kind: 'mr', noteId: 56 }, human: true, addressed: 'direct' })
+    expect(received.some(trigger => trigger.meta.noteId === 57)).toBe(false)
   })
   it('binds an MR that is the ticket origin, refuses a foreign one, and reports its merge only to non-GitLab channels', () => {
     const bound: [string, string, boolean][] = []
@@ -184,14 +225,14 @@ describe('GitLab reads and replies', () => {
 /** Minimal Source context for polling and binding tests. */
 function fakeContext(input: { commands: Commands; store?: Map<string, unknown>; received?: Trigger[];
   patches?: [string, Record<string, unknown>][]; tickets?: Ticket[]; bound?: [string, string, boolean][];
-  triggers?: Record<string, Trigger> }) {
+  triggers?: Record<string, Trigger>; config?: Record<string, unknown> }) {
   const store = input.store ?? new Map<string, unknown>()
   const patches = input.patches ?? []
   const bound = input.bound ?? []
   const received = input.received ?? []
   const tickets = input.tickets ?? []
   const config = GitlabConfigSchema.parse({ project: 'team/app', cli: 'glab', baseUrl: 'https://gitlab.example.com',
-    observeIssues: true, observeMergeRequests: true, observeComments: true })
+    observeIssues: true, observeMergeRequests: true, observeComments: true, ...input.config })
   const patch = (ticket: Ticket, thread: string, own: boolean) => {
     if (!ticket.follows) ticket.follows = []
     ticket.follows.push({ thread: `gitlab:${thread}`, own })
