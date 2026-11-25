@@ -51,7 +51,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ### Agent GitLab account and token
 
-1. Create a GitLab user account or use a dedicated service account, add it to the project as **Developer** or higher, and create a personal or project access token with `api` and `write_repository` scopes. On an instance that permits only one account per person, use your own account and turn on **The account belongs to the person using the agent** on the GitLab card. The Source then treats Issues, merge requests and comments that mention that account (from anyone, including you) as direct requests; your own unmentioned content does not trigger, and the agent's marked replies do not either. Commits and merge requests appear under your name.
+1. Create a GitLab user account or use a dedicated service account, add it to the project as **Developer** or higher, and create a personal or project access token with `api` and `write_repository` scopes. On an instance that permits only one account per person, use your own account and turn on **The account belongs to the person using the agent** on the GitLab card. The Source then treats Issues, merge requests and comments that mention that account (from anyone, including you) as requests; your own unmentioned content does not trigger, and the agent's marked replies do not either. Commits and merge requests appear under your name.
 2. Store the token in a file only the operator and the dsh-superagent process can read, for example:
 
    ```sh
