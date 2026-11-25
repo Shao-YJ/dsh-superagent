@@ -54,6 +54,8 @@ describe('GitLab thread keys and triggers', () => {
       .toMatchObject({ actor: { source: 'gitlab', id: 'lead' }, addressed: 'direct' })
     expect(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 9, username: 'lead' }, 1).id)
       .not.toBe(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 9, username: 'lead' }, 2).id)
+    expect(subjectTrigger('mr', MR, 'assigned', deployment, 'agent-bot', { id: 7, username: 'agent-bot' }, undefined, true))
+      .toMatchObject({ human: true, addressed: 'direct' })
     const issue = { ...MR, iid: 8, title: 'Bug', state: 'opened', author: { username: 'agent-bot' } }
     const ownIssue = subjectTrigger('issue', issue, 'opened', deployment, 'agent-bot', undefined, undefined, true)
     expect(ownIssue).toMatchObject({ human: true })
