@@ -5,7 +5,7 @@ import { GitlabAccountsSchema } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
 import { KV } from '../kv.ts'
 import { cursorAt, pause, POLL_HORIZON_MS, pollThreads as pollEach } from './poll.ts'
-import { agentNote, DiscussionSchema, EventSchema, gitlabAddress, gitlabThread, IssueSchema, MergeRequestSchema, NoteSchema, noteTrigger, SOURCE,
+import { agentNote, DiscussionSchema, EventSchema, gitlabAddress, gitlabThread, IssueSchema, mentions, MergeRequestSchema, NoteSchema, noteTrigger, SOURCE,
   subjectTrigger, TodoSchema, type GitlabDiscussion, type GitlabIssue, type GitlabKind, type GitlabMergeRequest, type GitlabNote } from './gitlab-trigger.ts'
 import { observeMergeRequest, readMergeRequest, mergeRequestsOf, ticketBranch } from './gitlab-mr.ts'
 import { gitlabThreadContext } from './gitlab-read.ts'
@@ -53,7 +53,7 @@ export const gitlabKind: SourceKind<GitlabConfig> = {
     { key: 'pollSeconds', type: 'number', advanced: true, min: 60, max: 3600, label: { zh: '轮询间隔 / 秒', en: 'Polling interval / seconds' } },
     { key: 'failuresBeforeError', type: 'number', advanced: true, min: 1, max: 20, label: { zh: '连续失败几次后报告异常', en: 'Failed polls before reporting an error' } },
     { key: 'ownAccount', type: 'switch', label: { zh: '账号是本人账号', en: 'The account belongs to the person using the agent' },
-      hint: { zh: '当内部 GitLab 每人只有一个账号时打开。来源会把配置的账号当作本人：本人写的 Issue、MR 和评论（没有智能体标记的）直接成为请求，智能体自己的回复带标记，不会再次触发。提交和 MR 会记在这个人名下。', en: 'Turn on when the internal GitLab allows one account per person. The Source treats the configured account as the person: their Issues, merge requests and unmarked comments become direct requests, while the agent marks its own replies so they do not trigger again. Commits and merge requests are attributed to that person.' }, },
+      hint: { zh: '当内部 GitLab 每人只有一个账号时打开。来源把配置的账号当作监听账号：任何人在 Issue、MR、评论中 @ 到该账号（或被指派）时视为请求；本人未被 @ 的内容不触发，智能体自己的标记回复也不会触发。提交和 MR 会记在这个人名下。', en: 'Turn on when the internal GitLab allows one account per person. The Source treats the configured account as the monitored person: an Issue, merge request or comment that mentions the account, from anyone including that person, is a request; its own unmentioned content does not trigger, and marked agent replies are skipped. Commits and merge requests are attributed to that person.' }, },
     { key: 'observeIssues', type: 'switch', label: { zh: '接收项目里的新 Issue', en: 'Receive new Issues in the project' },
       hint: { zh: '打开后，没有 @ 智能体的新 Issue 也会收到，由策略的接收表决定是否成为候选。从打开的时候开始，不读以前的。', en: 'New Issues that do not mention the agent are received too, and the Policy\'s admission table decides whether they become candidates. Starts when switched on; earlier ones are not read.' } },
     { key: 'observeMergeRequests', type: 'switch', label: { zh: '接收项目里的新 MR', en: 'Receive new merge requests in the project' },
@@ -267,7 +267,7 @@ async function pollEvents(ctx: SourceContext, round: Round): Promise<void> {
   const config = ctx.config<GitlabConfig>(SOURCE)
   if (!config) return
   const own = config.ownAccount === true
-  // In own-account mode the person's own content is input even when the broad observation switches are off.
+  // In own-account mode the account is monitored for mentions even when the broad observation switches are off.
   const kinds = (Object.keys(OBSERVED) as ScopeRow[]).filter(kind => own || config[OBSERVED[kind]])
   if (!kinds.length) { ctx.state.set(KV.gitlab.events, undefined); return }
   const { login } = ctx.deployment.gitlab!
@@ -289,36 +289,44 @@ async function pollEvents(ctx: SourceContext, round: Round): Promise<void> {
     if (Date.parse(event.created_at) < Date.parse(since)) continue
     const author = event.author?.username
     if (author === login && !own) continue
-    if (event.target_type === 'Issue' && (config.observeIssues || (own && author === login)) && fresh(event.created_at, 'issues') && event.target_iid) {
+    if (event.target_type === 'Issue' && (config.observeIssues || own) && fresh(event.created_at, 'issues') && event.target_iid) {
       const issue = await subjectOf(ctx, round, 'issue', event.target_iid)
-      // Own-account mode accepts the person's own Issues; the observation switch governs other people's.
       const self = own && issue.author.username === login
-      if (!config.observeIssues && !self) continue
+      const asked = own && mentions(`${issue.title}\n${issue.description ?? ''}`, login)
+      // In own-account mode the account is a person: only content that mentions it is a request, even when it is their own;
+      // other people's unmentioned Issues still follow the observation switch.
+      if (self && !asked) continue
+      if (!config.observeIssues && !asked) continue
       if (event.action_name === 'opened') { nameThread(ctx, 'issue', issue.iid, issue); await ctx.receive(subjectTrigger('issue', issue, 'opened', ctx.deployment, login, undefined, undefined, own)) }
       continue
     }
-    if (event.target_type === 'MergeRequest' && (config.observeMergeRequests || (own && author === login)) && fresh(event.created_at, 'mergeRequests') && event.target_iid) {
+    if (event.target_type === 'MergeRequest' && (config.observeMergeRequests || own) && fresh(event.created_at, 'mergeRequests') && event.target_iid) {
       const mr = await subjectOf(ctx, round, 'mr', event.target_iid) as GitlabMergeRequest
-      // A dedicated agent account never treats its own merge requests as requests; own-account mode does, except for open-ticket output.
+      // A dedicated agent account never treats its own merge requests as requests; own-account mode does only when the MR mentions the account, except for open-ticket output.
       if (!own && (author === login || mr.author.username === login)) continue
       const self = own && (author === login || mr.author.username === login)
-      if (!config.observeMergeRequests && !self) continue
+      const asked = own && mentions(`${mr.title}\n${mr.description ?? ''}`, login)
       // A merge request the agent opened for an open ticket is output, not a new request.
       if (self && ctx.tickets.open().some(ticket => ticketBranch(ticket, mr.source_branch))) continue
+      if (self && !asked) continue
+      if (!config.observeMergeRequests && !asked) continue
       if (event.action_name === 'opened') {
         nameThread(ctx, 'mr', mr.iid, mr)
         await ctx.receive(subjectTrigger('mr', mr, 'opened', ctx.deployment, login, undefined, undefined, own))
       }
       continue
     }
-    if (event.target_type === 'Note' && (config.observeComments || (own && event.note?.author.username === login)) && event.note && fresh(event.created_at, 'comments')) {
+    if (event.target_type === 'Note' && (config.observeComments || own) && event.note && fresh(event.created_at, 'comments')) {
       const kind: GitlabKind = event.note.noteable_type === 'MergeRequest' ? 'mr' : 'issue'
       const iid = event.note.noteable_iid ?? event.target_iid
       if (!iid) continue
       const note = event.note
       if (note.system) continue
       const self = own && note.author.username === login
-      if (!config.observeComments && !self) continue
+      const asked = own && mentions(note.body, login)
+      // The person's own unmentioned notes are not requests; mentions from anyone are, without needing the broad switch.
+      if (self && !asked) continue
+      if (!config.observeComments && !asked) continue
       if (self && agentNote(note)) continue
       const subject = await subjectOf(ctx, round, kind, iid)
       await ctx.receive(noteTrigger(kind, iid, note, subject, login, undefined, own))
@@ -328,8 +336,8 @@ async function pollEvents(ctx: SourceContext, round: Round): Promise<void> {
 }
 /**
  * Reads notes of an Issue (newest first, so a long history costs one page) or discussions of a Merge Request, receiving the notes
- * created since `since` oldest first. A system note is skipped; a self note is skipped unless own-account mode marks it as
- * the person's own input.
+ * created since `since` oldest first. A system note is skipped; a self note is skipped unless own-account mode and it mentions
+ * the monitored account.
  */
 async function ingestNotes(ctx: SourceContext, round: Round, kind: GitlabKind, iid: number, since: string,
   subject: GitlabIssue | GitlabMergeRequest, own = false): Promise<void> {
@@ -352,7 +360,7 @@ async function ingestNotes(ctx: SourceContext, round: Round, kind: GitlabKind, i
       if (listed.length < 100) break
     }
   }
-  const fresh = notes.filter(({ note }) => !note.system && (note.author.username !== login || (own && !agentNote(note))) && Date.parse(note.created_at) >= Date.parse(since))
+  const fresh = notes.filter(({ note }) => !note.system && (note.author.username !== login || (own && !agentNote(note) && mentions(note.body, login))) && Date.parse(note.created_at) >= Date.parse(since))
   fresh.sort((a, b) => a.note.created_at.localeCompare(b.note.created_at))
   for (const { note, discussion } of fresh) {
     if (stopped(ctx, round)) throw new Error('The GitLab Source stopped during the poll')
@@ -369,7 +377,7 @@ async function ingestDiscussionNote(ctx: SourceContext, round: Round, iid: numbe
     const discussions: GitlabDiscussion[] = validItems(DiscussionSchema, listed, round.tally)
     const found = discussions.find(item => item.notes.some(note => note.id === noteId))
     if (found) {
-      const notes = found.notes.filter(note => !note.system && (note.author.username !== login || (own && !agentNote(note))) && Date.parse(note.created_at) >= Date.parse(since))
+      const notes = found.notes.filter(note => !note.system && (note.author.username !== login || (own && !agentNote(note) && mentions(note.body, login))) && Date.parse(note.created_at) >= Date.parse(since))
         .sort((a, b) => a.created_at.localeCompare(b.created_at))
       for (const note of notes) await ctx.receive(noteTrigger('mr', iid, note, subject, login, found.id, own))
       ctx.state.set(KV.gitlab.cursor(gitlabThread('mr', iid)), cursorAt(round.started))
