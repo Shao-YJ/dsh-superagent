@@ -18,6 +18,8 @@ export interface SourceContextDeps {
   readonly deployment: Deployment
   readonly ready: Promise<void>
   configured(): boolean
+  /** Setup problems by place; a Source kind receives the one whose `place` matches its kind on `context.problem`. */
+  readonly problems?: Partial<Record<string, SetupProblem>> | undefined
   /** Setup problem whose `place` matches the Source kind receives it on `context.problem`. */
   readonly setupProblem?: SetupProblem | undefined
   /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
@@ -38,7 +40,7 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     commands: deps.commands,
     ready: deps.ready,
     configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    get problem() { return deps.problems?.[kind.kind] ?? [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined

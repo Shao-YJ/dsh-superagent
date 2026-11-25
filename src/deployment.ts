@@ -1,12 +1,12 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
 import { LIMITS } from './limits.ts'
-import { accessSync, constants, statSync } from 'node:fs'
+import { accessSync, constants, readFileSync, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import type { Volatile } from '@deepseek-ai/cordis'
 import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
+import { runAsWorker, sameDirectory, withoutDirectory, workerBin, writeGitlabCli } from './infra/environment.ts'
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
@@ -46,14 +46,39 @@ export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
+/** A GitLab instance, its project, and the `glab` identity the agent acts as; `tokenFile` holds a token when the CLI is not signed in itself. */
+export const GitlabAccountsSchema = z.object({
+  baseUrl: z.string().trim().default('https://gitlab.com'),
+  project: z.string().trim().default(''),
+  cli: z.string().trim().default(''),
+  tokenFile: z.string().trim().default(''),
+  commitEmail: z.string().trim().default(''),
+})
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape),
+  gitlab: Object.keys(GitlabAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  /** Canonical GitHub repository, absent in a GitLab-only installation. */
+  repository?: string
+  github?: { cli: string; login: string; noreply: string }
+  gitlab?: GitlabAccount
   feishu?: FeishuBot
+}
+export interface GitlabAccount {
+  /** Instance root, without a trailing slash; a self-managed instance may live under a relative path. */
+  baseUrl: string
+  /** A `glab` wrapper, signed in or reading the token file. */
+  cli: string
+  login: string
+  id: number
+  commitEmail: string
+  /** Canonical `path_with_namespace`. */
+  project: string
+  projectId: number
+  /** Absent when the CLI is signed in itself; otherwise the agent's credential helper reads this file. */
+  tokenFile?: string
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 
@@ -83,11 +108,12 @@ function parsed<T>(schema: z.ZodType<T>, text: string): T | undefined {
   const result = schema.safeParse(value)
   return result.success ? result.data : undefined
 }
-/** Verify the agent's GitHub CLI identity and push access to the configured repository. */
-export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment> {
+/** Verify the agent's GitHub CLI identity and push access to the configured repository; undefined when the GitHub Source is not configured. */
+export async function resolveDeployment(machine: Machine, github: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<Deployment | undefined> {
   const { stateDir } = machine
   const accounts = GithubAccountsSchema.parse(github ?? {})
   const remote = accounts.repository
+  if (!remote && !accounts.cli) return undefined
   if (!remote) throw new SetupError('repositoryUnset')
   if (!accounts.cli) throw new SetupError('agentCliUnset')
   let cli: string
@@ -103,6 +129,64 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
   const repository = access.name
   if (access.push !== true) throw new SetupError('repositoryReadOnly', { account: agent.login, repository })
   return { ...machine, repository, github: { cli, login: agent.login, noreply: `${agent.id}+${agent.login}@users.noreply.github.com` } }
+}
+
+function gitlabBase(raw: string): { baseUrl: string; host: string } {
+  let url: URL
+  try { url = new URL(raw) } catch { throw new SetupError('gitlabBaseUrlInvalid', { url: raw }) }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new SetupError('gitlabBaseUrlInvalid', { url: raw })
+  const baseUrl = `${url.origin}${url.pathname}`.replace(/\/+$/, '')
+  return { baseUrl, host: url.host }
+}
+const GitlabUser = z.object({ id: z.number().int().positive(), username: z.string(), name: z.string().nullish(),
+  email: z.string().nullish(), commit_email: z.string().nullish() })
+const GitlabProject = z.object({ id: z.number().int().positive(), path_with_namespace: z.string(), archived: z.boolean().nullish(),
+  permissions: z.object({ project_access: z.object({ access_level: z.number() }).nullish(), group_access: z.object({ access_level: z.number() }).nullish() }).nullish() })
+/** Developer or higher, the least access that can push a branch. */
+const DEVELOPER = 30
+/**
+ * Verify the agent's GitLab account and project access through `glab`, using a token file when one is configured.
+ * Returns the canonical project and account facts, or undefined when the GitLab Source is not configured.
+ * A configured token file is wrapped by a generated CLI script, so the token itself never enters a worker's environment.
+ */
+export async function resolveGitlab(machine: Machine, gitlab: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const accounts = GitlabAccountsSchema.parse(gitlab ?? {})
+  if (!accounts.project && !accounts.cli && !accounts.tokenFile) return undefined
+  if (!accounts.project) throw new SetupError('gitlabProjectUnset')
+  const { baseUrl, host } = gitlabBase(accounts.baseUrl)
+  if (!accounts.cli && !accounts.tokenFile) throw new SetupError('gitlabCliUnset')
+  let cli: string
+  try { cli = executable(accounts.cli || 'glab', path, workerBin(machine.stateDir)) } catch (error) {
+    throw new SetupError('gitlabCliMissing', { output: reason(error) })
+  }
+  if (accounts.tokenFile) {
+    const file = accounts.tokenFile
+    if (!isAbsolute(file)) throw new SetupError('gitlabTokenUnreadable', { file, output: 'The token file must be an absolute path' })
+    let token: string
+    try { token = readFileSync(file, 'utf8').trim() } catch (error) { throw new SetupError('gitlabTokenUnreadable', { file, output: reason(error) }) }
+    if (!token) throw new SetupError('gitlabTokenInvalid', { file })
+    try { cli = await writeGitlabCli(machine.stateDir, cli, file, baseUrl) } catch (error) {
+      throw new SetupError('gitlabCliWriteFailed', { output: reason(error) })
+    }
+  }
+  const api = (...args: string[]): Promise<string> => probe([cli, 'api', '--hostname', host, ...args]).catch((error: unknown) => {
+    throw new SetupError('gitlabCliSignedOut', { output: reason(error) })
+  })
+  const user = parsed(GitlabUser, await api('user'))
+  if (!user) throw new SetupError('gitlabCliNoAccount')
+  const encoded = encodeURIComponent(accounts.project)
+  const project = parsed(GitlabProject, await api(`projects/${encoded}`).catch((error: unknown) => {
+    throw new SetupError('gitlabProjectUnreadable', { account: user.username, project: accounts.project, output: reason(error) })
+  }))
+  if (!project) throw new SetupError('gitlabProjectUnreadable', { account: user.username, project: accounts.project })
+  const access = project.permissions?.project_access?.access_level ?? project.permissions?.group_access?.access_level
+  if (project.archived === true || access === undefined || access < DEVELOPER) {
+    throw new SetupError('gitlabProjectReadOnly', { account: user.username, project: project.path_with_namespace })
+  }
+  const commitEmail = accounts.commitEmail || user.commit_email || user.email || ''
+  if (!commitEmail) throw new SetupError('gitlabCommitEmailUnset', { account: user.username })
+  return { baseUrl, cli, login: user.username, id: user.id, commitEmail, project: project.path_with_namespace,
+    projectId: project.id, ...accounts.tokenFile ? { tokenFile: accounts.tokenFile } : {} }
 }
 
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })

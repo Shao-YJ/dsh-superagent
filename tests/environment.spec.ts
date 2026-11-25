@@ -1,11 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SENSITIVE_ENV_PATTERN, type SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { GIT_LOCATION, agentVariables, credentialHelper, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment }
+import { GIT_LOCATION, agentVariables, credentialHelper, gitlabCredential, runAsWorker, verifyDirectory, withoutDirectory, workerBin, workerGitConfig, writeEnvironment, writeGitlabCli }
   from '../src/infra/environment.ts'
 import { CliError } from '../src/infra/commands.ts'
 import { testDeployment } from './fixtures/deployment.ts'
@@ -26,7 +26,7 @@ describe('worker shims', () => {
   it('run a wrapper that calls `gh` by name without reaching the shim again, and keep the caller\'s other PATH entries', async () => {
     program(join(dir, 'real', 'gh'), 'echo "{\\"login\\":\\"agent-bot\\",\\"config\\":\\"$GH_CONFIG_DIR\\",\\"path\\":\\"$PATH\\"}"')
     const wrapper = program(join(dir, 'gh-agent'), `GH_CONFIG_DIR=${dir}/agent-config exec gh "$@"`)
-    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...testDeployment().github, cli: wrapper }, feishu: undefined }), [])
+    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...testDeployment().github!, cli: wrapper }, feishu: undefined }), [])
     const bin = workerBin(dir)
     const path = [bin, join(dir, 'venv'), join(dir, 'real'), '/usr/bin', '/bin'].join(':')
     const { stdout } = await exec('gh', ['api', 'user'], { env: { PATH: path }, timeout: 10_000 })
@@ -41,7 +41,7 @@ describe('worker shims', () => {
   it('keep `gh` and `lark-cli` working, and shim no `git`, when the blocked commands name the commands workers need', async () => {
     const gh = program(join(dir, 'gh-agent'), 'echo gh "$@"'), lark = program(join(dir, 'lark-bot'), 'echo lark "$@"')
     const base = testDeployment()
-    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...base.github, cli: gh }, feishu: { ...base.feishu!, cli: lark } }), ['gh', 'git', 'lark-cli'])
+    await writeEnvironment(testDeployment({ stateDir: dir, github: { ...base.github!, cli: gh }, feishu: { ...base.feishu!, cli: lark } }), ['gh', 'git', 'lark-cli'])
     const bin = workerBin(dir)
     expect([(await exec(join(bin, 'gh'), ['api', 'user'])).stdout, (await exec(join(bin, 'lark-cli'), ['im'])).stdout]).toEqual(['gh api user\n', 'lark im\n'])
     expect(readdirSync(bin)).not.toContain('git')
@@ -69,6 +69,25 @@ describe('worker shims', () => {
     expect(readdirSync(workerBin(dir)).sort()).toEqual(['gh', 'lark-cli'])
     expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('Written by dsh-superagent')
   })
+
+  it('runs glab through a token wrapper and reads the token file only for that command', async () => {
+    const token = join(dir, 'gitlab-token'); writeFileSync(token, 'secret-token\n')
+    const agent = program(join(dir, 'real', 'glab'), 'printf \'{"token":"%s","host":"%s","api":"%s"}\\n\' "$GITLAB_TOKEN" "$GITLAB_HOST" "$GITLAB_API_HOST"')
+    const cli = await writeGitlabCli(dir, agent, token, 'https://gitlab.example.com')
+    const deployment = testDeployment({ stateDir: dir, repository: undefined, github: undefined, feishu: undefined,
+      gitlab: { baseUrl: 'https://gitlab.example.com', cli, login: 'agent-bot', id: 7, commitEmail: 'agent@example.com',
+        project: 'team/app', projectId: 9, tokenFile: token } })
+    await writeEnvironment(deployment, [])
+    const bin = workerBin(dir)
+    expect(readdirSync(bin).sort()).toEqual(['glab', 'lark-cli'])
+    const env = workerEnv({ PATH: [bin, join(dir, 'real'), '/usr/bin', '/bin'].join(':'), HOME: dir, ...agentVariables(dir) })
+    const { stdout } = await exec(join(bin, 'glab'), ['api', 'user'], { env, timeout: 10_000 })
+    expect(JSON.parse(stdout)).toEqual({ token: 'secret-token', host: 'gitlab.example.com', api: 'https://gitlab.example.com/api/v4' })
+    expect(env.GITLAB_TOKEN).toBeUndefined()
+    expect(statSync(gitlabCredential(dir)).mode & 0o111).not.toBe(0)
+    expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('[credential "https://gitlab.example.com"]')
+    expect(readFileSync(workerGitConfig(dir), 'utf8')).toContain('insteadOf = git@gitlab.example.com:')
+  })
 })
 
 describe('agent git configuration', () => {
@@ -76,7 +95,7 @@ describe('agent git configuration', () => {
     const home = join(dir, 'home'); mkdirSync(home)
     // Operator configuration that rewrites HTTPS to SSH, enables commit signing, and sets a credential helper.
     writeFileSync(join(home, '.gitconfig'), '[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n[commit]\n\tgpgsign = true\n[credential]\n\thelper = osxkeychain\n')
-    const deployment = testDeployment({ stateDir: dir, github: { ...testDeployment().github, cli: '/opt/agent tools/gh' } })
+    const deployment = testDeployment({ stateDir: dir, github: { ...testDeployment().github!, cli: '/opt/agent tools/gh' } })
     await writeEnvironment(deployment, [])
     // Operator identity variables and git's fallback from the OS username must not apply to worker commits.
     const env = workerEnv({ PATH: process.env.PATH, HOME: home, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.abbrev', GIT_CONFIG_VALUE_0: '12', GIT_AUTHOR_NAME: 'Operator', GIT_COMMITTER_EMAIL: 'operator@example.com', ...agentVariables(dir) })
@@ -100,7 +119,7 @@ it('fails instead of asking the operator\'s askpass helpers when the agent\'s cr
   const log = join(dir, 'asked')
   const askpass = program(join(dir, 'askpass'), `echo asked >> ${log}; echo operator-secret`)
   const agent = program(join(dir, 'real', 'gh'), 'exit 0')
-  const deployment = testDeployment({ stateDir: dir, github: { ...testDeployment().github, cli: agent } })
+  const deployment = testDeployment({ stateDir: dir, github: { ...testDeployment().github!, cli: agent } })
   await writeEnvironment(deployment, [])
   const env = workerEnv({ PATH: process.env.PATH, HOME: dir, GIT_ASKPASS: askpass, SSH_ASKPASS: askpass, ...agentVariables(dir) })
   await exec('git', ['init', '-q', 'repo'], { cwd: dir, env })

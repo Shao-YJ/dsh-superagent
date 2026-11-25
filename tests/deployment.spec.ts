@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, resolveGitlab, type Machine, type Probe } from '../src/deployment.ts'
+import { gitlabCli } from '../src/infra/environment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -60,10 +61,10 @@ describe('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
     expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })
-    expect(deployment.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
+    expect(deployment!.github).toEqual({ cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' })
     expect(deployment).not.toHaveProperty('feishu')
     // A renamed repository is still resolved by its old name; notifications carry GitHub's current full_name.
-    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path)).repository).toBe('acme/widgets')
+    expect((await resolveDeployment(machine(), { repository: 'acme/gadgets', cli: 'gh' }, probe, path))!.repository).toBe('acme/widgets')
   })
   it('names what setup needs and where it is set', async () => {
     const needs = (place: string, code: string, values: Record<string, unknown>, github: unknown) =>
@@ -82,6 +83,44 @@ describe('setup', () => {
     await needs('github', 'repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, { repository, cli: unreadable })
     await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
     expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
+  })
+  it('reads a self-managed GitLab project through glab, including a token file it never copies into the worker environment', async () => {
+    const token = join(dir, 'gitlab-token')
+    writeFileSync(token, 'glpat-secret\n')
+    const project = (overrides: Record<string, unknown> = {}) => JSON.stringify({ id: 9, path_with_namespace: 'team/app', archived: false,
+      permissions: { project_access: { access_level: 30 } }, ...overrides })
+    program(join(dir, 'bin', 'glab'), `case "$*" in
+  "api --hostname gitlab.internal user") echo '{"id":7,"username":"Agent-Bot","commit_email":"7+Agent-Bot@users.noreply.gitlab.internal"}' ;;
+  "api --hostname gitlab.internal projects/team%2Fapp") echo '${project()}' ;;
+esac`)
+    const deployment = await resolveGitlab(machine(), { project: 'team/app', cli: 'glab', tokenFile: token,
+      baseUrl: 'https://gitlab.internal/' }, probe, path)
+    expect(deployment).toEqual({ baseUrl: 'https://gitlab.internal', cli: gitlabCli(join(dir, 'state')), login: 'Agent-Bot', id: 7,
+      commitEmail: '7+Agent-Bot@users.noreply.gitlab.internal', project: 'team/app', projectId: 9, tokenFile: token })
+    const wrapper = readFileSync(gitlabCli(join(dir, 'state')), 'utf8')
+    expect(wrapper).toContain(token)
+    expect(wrapper).toContain('GITLAB_TOKEN')
+    expect(wrapper).not.toContain('glpat-secret')
+    const refuses = async (code: string, values: Record<string, unknown>, config: Record<string, unknown>) =>
+      expect(resolveGitlab(machine(), config, probe, path)).rejects.toEqual(setupError('gitlab', code, values))
+    await refuses('gitlabProjectUnset', {}, { baseUrl: 'https://gitlab.internal', tokenFile: token })
+    await refuses('gitlabBaseUrlInvalid', { url: 'not a url' }, { project: 'team/app', cli: 'glab', baseUrl: 'not a url' })
+    await refuses('gitlabCliUnset', {}, { project: 'team/app', baseUrl: 'https://gitlab.internal' })
+    await refuses('gitlabCliMissing', { output: `${join(dir, 'missing')} is not an executable file` }, { project: 'team/app', cli: join(dir, 'missing') })
+    await refuses('gitlabTokenUnreadable', { file: join(dir, 'missing-token') },
+      { project: 'team/app', tokenFile: join(dir, 'missing-token') })
+    writeFileSync(join(dir, 'empty-token'), '  \n')
+    await refuses('gitlabTokenInvalid', { file: join(dir, 'empty-token') }, { project: 'team/app', tokenFile: join(dir, 'empty-token') })
+    program(join(dir, 'bin', 'glab'), `case "$*" in
+  "api --hostname gitlab.internal user") echo '{"id":7,"username":"Agent-Bot"}' ;;
+  "api --hostname gitlab.internal projects/team%2Fapp") echo '${project({ permissions: { project_access: { access_level: 30 } } })}' ;;
+esac`)
+    await refuses('gitlabCommitEmailUnset', { account: 'Agent-Bot' }, { project: 'team/app', cli: 'glab', baseUrl: 'https://gitlab.internal', tokenFile: token })
+    program(join(dir, 'bin', 'glab'), `case "$*" in
+  "api --hostname gitlab.internal user") echo '{"id":7,"username":"Agent-Bot","email":"bot@example.com"}' ;;
+  "api --hostname gitlab.internal projects/team%2Fapp") echo '${project({ archived: true })}' ;;
+esac`)
+    await refuses('gitlabProjectReadOnly', { account: 'Agent-Bot', project: 'team/app' }, { project: 'team/app', cli: 'glab', baseUrl: 'https://gitlab.internal', tokenFile: token })
   })
   it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
     expect(await resolveFeishuBot(machine(), {}, probe, path)).toBeUndefined()

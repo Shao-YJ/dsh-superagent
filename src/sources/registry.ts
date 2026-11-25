@@ -4,6 +4,7 @@ import type { Commands } from '../infra/commands.ts'
 import { HealthBoard, type HealthEntry } from '../infra/health.ts'
 import { AdmissionTableSchema, type Settings } from '../policy.ts'
 import type { ChannelLink, ChannelLinks, SourceInstance, SourceKind, TriggerContext, VariableSpec } from './kind.ts'
+import type { ReviewSource } from './review.ts'
 
 
 /**
@@ -41,6 +42,10 @@ export class SourceRegistry implements SourceScope {
     return new Map(names.flatMap(name => { const entry = this.health.get(name); return entry ? [[name, entry] as const] : [] }))
   }
   kind(id: string): SourceKind | undefined { return this.kinds.get(id) }
+  /** The review adapter a registered forge kind contributes, if any. */
+  review(id: string): ReviewSource | undefined { return this.kinds.get(id)?.review }
+  /** Every registered kind's review adapter; end notices dispatch on a Ticket's review source. */
+  reviews(): ReviewSource[] { return [...this.kinds.values()].flatMap(kind => kind.review ? [kind.review] : []) }
   /** Every registered kind's instance ordered by ID, followed by stored instances whose kind is not installed (with their config kept as stored). */
   instances(settings = this.settings()): (SourceInstance & { installed: boolean })[] {
     const installed = [...this.kinds.values()].sort((a, b) => a.kind.localeCompare(b.kind)).map(kind => ({ ...this.resolve(kind, settings.sources[kind.kind]), installed: true }))
