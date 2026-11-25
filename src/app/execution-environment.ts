@@ -11,6 +11,7 @@ export const EXECUTOR_VARIABLES: readonly (VariableSpec & { ticket?: true })[] =
   { key: 'DSH_SUPERAGENT_DIR', ticket: true, description: { zh: '这个工单的执行目录；执行器 Session 在其中工作', en: 'This ticket\'s directory; the executor Session works in it' } },
   { key: 'DSH_SUPERAGENT_NAME', ticket: true, description: { zh: '工单的短名，也是执行目录的名字', en: 'The ticket\'s short name, also its directory\'s name' } },
   { key: 'DSH_SUPERAGENT_TICKET', ticket: true, description: { zh: '工单 id', en: 'The ticket id' } },
+  { key: 'DSH_SUPERAGENT_SOURCE', ticket: true, description: { zh: '接下工单的触发来自哪个来源，例如 github、gitlab 或 feishu', en: 'Which Source the ticket\'s trigger came from, such as github, gitlab or feishu' } },
   { key: 'DSH_SUPERAGENT_BLOCKED_COMMANDS', description: { zh: '这个执行环境禁止调用的命令，以空格分隔；不要运行它们', en: 'Commands blocked in this execution environment, separated by spaces; never run them' } },
 ]
 export interface Variable { key: string; value: string; description: Localized; owner: string }
@@ -18,19 +19,31 @@ export interface Variable { key: string; value: string; description: Localized; 
 export const executionRoot = (settings: Settings, stateDir: string): string => settings.executor.directory || join(stateDir, 'work')
 
 /** Lists all declared variables grouped by owner; `enabled` is false for Sources that are currently switched off. */
-export function declaredVariables(sources: SourceRegistry, settings?: Settings): { owner: string; enabled: boolean; variables: readonly VariableSpec[] }[] {
+export function declaredVariables(sources: SourceRegistry, settings?: Settings,
+  deployment?: Deployment): { owner: string; enabled: boolean; variables: readonly VariableSpec[] }[] {
   const on = new Set(sources.environments(settings).map(item => item.kind.kind))
   return [{ owner: 'executor', enabled: true, variables: EXECUTOR_VARIABLES },
-    ...sources.declarations().map(({ kind, variables }) => ({ owner: kind, enabled: on.has(kind), variables }))]
+    ...sources.declarations().map(({ kind, variables }) => ({ owner: kind, enabled: on.has(kind) || (kind === 'gitlab' && !!deployment?.gitlab), variables }))]
 }
 
 export function environmentOf(input: { deployment: Deployment; sources: SourceRegistry; settings: Settings; ticket?: { id: string; name: string; directory: string }; trigger?: Trigger }): Variable[] {
   const { deployment, sources, settings, ticket, trigger } = input
-  const executor: Record<string, string> = { DSH_SUPERAGENT_BLOCKED_COMMANDS: settings.executor.blockedCommands.join(' '), ...ticket ? { DSH_SUPERAGENT_DIR: ticket.directory, DSH_SUPERAGENT_NAME: ticket.name, DSH_SUPERAGENT_TICKET: ticket.id } : {} }
+  const executor: Record<string, string> = { DSH_SUPERAGENT_SOURCE: trigger?.source ?? '',
+    DSH_SUPERAGENT_BLOCKED_COMMANDS: settings.executor.blockedCommands.join(' '),
+    ...ticket ? { DSH_SUPERAGENT_DIR: ticket.directory, DSH_SUPERAGENT_NAME: ticket.name, DSH_SUPERAGENT_TICKET: ticket.id } : {} }
   const result: Variable[] = EXECUTOR_VARIABLES.filter(spec => !spec.ticket || ticket).map(spec => ({ key: spec.key, value: executor[spec.key] ?? '', description: spec.description, owner: 'executor' }))
   for (const { kind, environment, config } of sources.environments(settings)) {
     const values = environment.values({ deployment, config, ...trigger ? { trigger } : {} })
     for (const spec of environment.variables) result.push({ key: spec.key, value: values[spec.key] ?? '', description: spec.description, owner: kind.kind })
+  }
+  // A GitLab account can be the code host while its Source is switched off (for example Feishu requests); its prepare and
+  // commit variables are then still needed in the worker environment.
+  if (deployment.gitlab && !result.some(variable => variable.key === 'DSH_SUPERAGENT_GITLAB_URL')) {
+    const environment = sources.kind('gitlab')?.environment
+    if (environment) {
+      const values = environment.values({ deployment, config: sources.instance('gitlab')?.config ?? {}, ...trigger ? { trigger } : {} })
+      for (const spec of environment.variables) result.push({ key: spec.key, value: values[spec.key] ?? '', description: spec.description, owner: 'gitlab' })
+    }
   }
   return result
 }

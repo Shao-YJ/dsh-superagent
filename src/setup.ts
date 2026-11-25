@@ -1,11 +1,12 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu'
+export type SetupPlace = 'deployment' | 'github' | 'gitlab' | 'feishu'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
-  gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
+  gitTooOld: ['deployment', 'git does not read the forge credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
   environmentFailed: ['deployment', 'Preparing the agent environment failed.'],
+  forgeUnset: ['deployment', 'No forge is configured: set the GitHub Source or the GitLab Source.'],
   repositoryUnset: ['github', 'The GitHub Source names no repository.'],
   agentCliUnset: ['github', 'The agent GitHub CLI is not set.'],
   agentCliMissing: ['github', 'The agent GitHub CLI was not found.'],
@@ -14,6 +15,18 @@ export const SETUP_PROBLEMS = {
   repositoryUnreadable: ['github', '@{account} cannot read {repository}.'],
   repositoryUnreported: ['github', 'The agent GitHub CLI did not return {repository}.'],
   repositoryReadOnly: ['github', '@{account} cannot push to {repository}.'],
+  gitlabBaseUrlInvalid: ['gitlab', 'The GitLab base URL {url} is not an http(s) URL.'],
+  gitlabCliUnset: ['gitlab', 'The GitLab Source names no glab CLI and no token file.'],
+  gitlabCliMissing: ['gitlab', 'The agent GitLab CLI was not found.'],
+  gitlabCliSignedOut: ['gitlab', 'The agent GitLab CLI or token cannot read its account.'],
+  gitlabCliNoAccount: ['gitlab', 'The agent GitLab CLI or token did not report a GitLab account.'],
+  gitlabTokenUnreadable: ['gitlab', 'The GitLab token file {file} cannot be read.'],
+  gitlabCliWriteFailed: ['gitlab', 'The GitLab CLI wrapper could not be written.'],
+  gitlabTokenInvalid: ['gitlab', 'The GitLab token file {file} is empty or has no usable token.'],
+  gitlabCommitEmailUnset: ['gitlab', 'The GitLab account @{account} reports no commit email; set one on the GitLab Source.'],
+  gitlabProjectUnset: ['gitlab', 'The GitLab Source names no project.'],
+  gitlabProjectUnreadable: ['gitlab', '@{account} cannot read the GitLab project {project}.'],
+  gitlabProjectReadOnly: ['gitlab', '@{account} is not a Developer of the GitLab project {project}, so it cannot push.'],
   feishuCliFailed: ['feishu', 'The bot lark-cli does not work.'],
   feishuNoApp: ['feishu', 'auth status of the bot lark-cli did not report the app.'],
   feishuBotNotReady: ['feishu', 'The bot identity of app {app} is {status}; configure the app secret with lark-cli.'],

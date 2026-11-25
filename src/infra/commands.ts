@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment } from '../deployment.ts'
+import type { Deployment, GitlabAccount } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -63,7 +63,21 @@ export class Commands {
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
-  get repository(): string { return this.deployment.repository }
+  get repository(): string {
+    const { repository } = this.deployment
+    if (!repository) throw new Error('This installation has no GitHub repository')
+    return repository
+  }
+  get gitlab(): GitlabAccount {
+    const { gitlab } = this.deployment
+    if (!gitlab) throw new Error('This installation has no GitLab account')
+    return gitlab
+  }
+  private get github(): { cli: string; login: string; noreply: string } {
+    const { github } = this.deployment
+    if (!github) throw new Error('This installation has no GitHub account')
+    return github
+  }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
@@ -73,7 +87,7 @@ export class Commands {
     } catch (error) { throw commandError(error, program) }
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
-  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.deployment.github.cli, args)) as T }
+  async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(this.github.cli, args)) as T }
   /**
    * Calls the GitHub API on a path within the configured repository, validating JSON output when a schema is provided
    * or returning raw CLI output (such as raw files or `--include` headers) when omitted.
@@ -82,7 +96,7 @@ export class Commands {
   async api<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
   async api(path: string, ...flags: string[]): Promise<string>
   async api<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
-    if (typeof schema === 'string') return this.run(this.deployment.github.cli, ['api', this.path(schema), ...rest])
+    if (typeof schema === 'string') return this.run(this.github.cli, ['api', this.path(schema), ...rest])
     const [path = '', ...flags] = rest
     return schema.parse(await this.gh(['api', this.path(path), ...flags]))
   }
@@ -90,6 +104,53 @@ export class Commands {
   async pages<T>(item: z.ZodType<T>, path: string, tally?: Tally): Promise<T[]> {
     const pages = z.array(z.array(z.unknown())).parse(await this.gh(['api', this.path(path), '--paginate', '--slurp']))
     return validItems(item, pages.flat(), tally)
+  }
+  /** Runs the agent's GitLab CLI and parses its JSON output; empty responses (such as a `204`) have no value. */
+  async glab<T>(args: string[]): Promise<T> {
+    const output = await this.run(this.gitlab.cli, args)
+    return (output.trim() ? JSON.parse(output) : undefined) as T
+  }
+  /**
+   * Calls the GitLab API on a path within the configured project, validating JSON output when a schema is provided
+   * or returning raw CLI output (such as a raw file) when omitted.
+   * @throws CliError with GitLab's HTTP status as `code` on failure.
+   */
+  async gitlabApi<T>(schema: z.ZodType<T>, path: string, ...flags: string[]): Promise<T>
+  async gitlabApi(path: string, ...flags: string[]): Promise<string>
+  async gitlabApi<T>(schema: z.ZodType<T> | string, ...rest: string[]): Promise<T | string> {
+    if (typeof schema === 'string') return this.run(this.gitlab.cli, ['api', this.gitlabPath(schema), ...rest])
+    const [path = '', ...flags] = rest
+    return schema.parse(await this.glab(['api', this.gitlabPath(path), ...flags]))
+  }
+  /** Fetches every page of a GitLab list by following the `x-next-page` header, skipping items that fail schema validation. */
+  async gitlabPages<T>(item: z.ZodType<T>, path: string, tally?: Tally, maxPages = 10): Promise<T[]> {
+    const items: unknown[] = []
+    let page = 1
+    for (let read = 0; read < maxPages; read++) {
+      const separator = path.includes('?') ? '&' : '?'
+      const output = await this.run(this.gitlab.cli, ['api', '--include', this.gitlabPath(`${path}${separator}per_page=100&page=${page}`)])
+      const split = /\r?\n\r?\n/.exec(output)
+      const headers = split ? output.slice(0, split.index) : output
+      const body = split ? output.slice(split.index + split[0].length) : ''
+      const next = Number(/^x-next-page:\s*(\d+)\s*$/im.exec(headers)?.[1] ?? 0)
+      let listed: unknown[]
+      try { listed = JSON.parse(body) as unknown[] } catch { listed = [] }
+      items.push(...Array.isArray(listed) ? listed : [listed])
+      if (!next || next <= page) break
+      page = next
+    }
+    return validItems(item, items, tally)
+  }
+  /** Calls the personal to-do list, which is not scoped to one project. */
+  async gitlabTodos<T>(item: z.ZodType<T>, query = 'state=pending&per_page=100'): Promise<T[]> {
+    return validItems(item, z.array(z.unknown()).parse(await this.glab(['api', `todos?${query}`])))
+  }
+  /** Completes one to-do of the agent account. */
+  async gitlabTodoDone(id: number): Promise<void> { await this.glab(['api', '--method', 'POST', `todos/${id}/mark_as_done`]) }
+  private gitlabPath(path: string): string {
+    const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)
+    if (outside) throw new Error('GitLab calls are restricted to the configured project')
+    return `projects/${encodeURIComponent(this.gitlab.project)}${path ? `/${path}` : ''}`
   }
   private path(path: string): string {
     const outside = /^\/|^[a-z]+:|(^|\/)\.\.?(\/|\?|$)/i.test(path)

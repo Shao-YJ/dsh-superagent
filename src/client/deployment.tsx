@@ -55,6 +55,7 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
   </Field>
   const feishu = accounts?.feishu ? accounts.feishu.name || accounts.feishu.botId
     : setup.feishuProblem ? setupText(t, setup.feishuProblem) : t('deploymentFeishuNone')
+  const gitlab = accounts?.gitlab
   return <form className="dt-form" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <Hint>{t('deploymentIntro')}</Hint>
@@ -62,8 +63,11 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
         <p className="dt-error" role="status"><SetupMessage problem={setup.problem} lead /></p><CheckSetupButton />
       </div>}
       {showAccounts && <Section title={t('deploymentDerived')} hint={t('deploymentDerivedHint')}>
-        <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? '—'],
-          [t('deploymentAgent'), accounts ? `@${accounts.agent}` : '—'], [t('deploymentFeishu'), feishu]]} />
+        <KeyValues rows={[[t('deploymentRepository'), accounts?.repository ?? gitlab?.project ?? '—'],
+          [t('deploymentAgent'), accounts?.agent ? `@${accounts.agent}` : gitlab ? `@${gitlab.account}` : '—'],
+          ...gitlab ? [[t('deploymentGitlab'), `${gitlab.baseUrl} · ${gitlab.commitEmail}`] as [string, string]] : [],
+          [t('deploymentFeishu'), feishu]]} />
+        {setup.problems?.gitlab && <p className="dt-error" role="status"><SetupMessage problem={setup.problems.gitlab} /></p>}
         <Hint>{t('deploymentAccountsWhere')}</Hint>
       </Section>}
       <Section title={t('deploymentMachine')}>

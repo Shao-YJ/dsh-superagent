@@ -1,7 +1,7 @@
 /** Compact, bounded model-facing projections of triggers, tickets, threads, and decisions; full texts stay behind readable resources. */
 import { latestReport, reasonText, threadKey, ticketStage, type Decision, type Mandate, type Thread, type Ticket, type TicketInput,
   type Trigger, type TriggerDisposition } from '../core/index.ts'
-import { pullOf } from '../sources/github-pull.ts'
+import { reviewOfThread } from '../sources/review.ts'
 import { batchLine, inputResource } from '../executor/dsh.ts'
 
 /** Collapses whitespace and truncates text for display previews while keeping code, angle brackets, and links intact for model readers. */
@@ -23,11 +23,17 @@ function cardState(ticket: Ticket): TicketCardState {
   if (stage.stage === 'person') return `person/${stage.action}`
   return stage.stage === 'idle' ? 'idle' : stage.stage === 'working' && stage.action ? 'working/queued' : 'working'
 }
+/** The open review a ticket follows, preferring the one it opened, with its forge and number. */
+export function reviewOfTicket(ticket: Pick<Ticket, 'follows'>): { source: string; number: number } | undefined {
+  const open = (ticket.follows ?? []).filter(item => !item.closed).flatMap(item => reviewOfThread(item.thread) ?? [])
+  return open.at(-1) ?? (ticket.follows ?? []).flatMap(item => reviewOfThread(item.thread) ?? []).at(-1)
+}
 export function ticketCard(ticket: Ticket) {
   const ended = ticket.ended && { at: ticket.ended.at, by: ticket.ended.by, reason: ticket.ended.reason ?? ticket.ended.outcome }
   const { attention } = ticket
+  const review = reviewOfTicket(ticket)
   return { ticket_id: ticket.id, title: ticket.title, state: cardState(ticket), strength: ticket.mandate.strength,
-    ...(pullOf(ticket) ? { pr_number: pullOf(ticket) } : {}), ...(ended ? { ended } : {}),
+    ...(review ? { review_source: review.source, review_number: review.number } : {}), ...(ended ? { ended } : {}),
     ...(attention ? { attention: { question: attention.question, ...attention.triggerId ? { trigger_id: attention.triggerId } : {} } } : {}),
     preview: preview(latestReport(ticket)?.summary ?? ''), read: `ticket/${ticket.id}` }
 }

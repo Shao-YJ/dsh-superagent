@@ -1,10 +1,20 @@
 # 009 GitLab support
 
-Status: design proposal. This revision does not implement a GitLab Source. It describes the problem, the constraints in the current code, a recommended design, and a staged path to GitHub parity.
+Status: Phase 1 implemented. The Source, deployment and review seams described here are in the code; CI parity, webhooks and GitHub parity beyond the core loop remain future work.
+
+## Implementation status
+
+Phase 1 implements the core loop: a GitLab project can be the deployment's only forge, or run beside GitHub; the Source reads the agent's to-dos, the project events feed, the notes and discussions of subscribed Threads, and polls Merge Request state. A to-do or a subscribed conversation becomes a Trigger; an MR opened from the ticket branch binds to its Ticket, and its merge or close ends the Ticket through the generic review contract. The GitLab Channel replies with idempotent marker notes and discussion replies.
+
+Login uses a GitLab personal or project access token supplied through `tokenFile`. Setup writes a `gitlab-cli` wrapper that reads the token on every invocation, and a `gitlab-credential` helper that answers git's credential prompt; the token appears in neither the worker environment nor this repository. The account must be a Developer of the project and the project must not be archived. `GITLAB_HOST`, `GITLAB_API_HOST`, `GITLAB_TOKEN` and `GITLAB_ACCESS_TOKEN` reach commands through the wrapper, so an internal self-managed instance works without its OAuth flow being reachable from here.
+
+The review path is forge-neutral: `src/sources/review.ts` defines `BoundReview` and `ReviewSource`; `github-review.ts` and `gitlab-review.ts` implement it; `src/app/reviews.ts` produces end notices for the other Channels. Executor tools keep the `pr_number` argument and add optional `review_source: 'github'|'gitlab'`; it is needed to choose GitLab when both forges are configured.
+
+Verification uses fake `glab` scripts and in-memory Source contexts. This checkout has no reachable internal GitLab instance or token, so Phase 1 has not been validated against a live self-managed GitLab; that validation remains with the deployment operator.
 
 ## Summary
 
-dsh-superagent is source-neutral in its domain: a Trigger, Thread, Ticket, Assignment and Policy do not depend on GitHub. GitHub is the only implemented code-review Source, and a set of generic modules assume it. Adding GitLab is therefore feasible without changing the domain model, but it is not a single plugin file. The work is a new Source plus a bounded multi-forge change to deployment, credentials, review binding, resources and prompts.
+dsh-superagent is source-neutral in its domain: a Trigger, Thread, Ticket, Assignment and Policy do not depend on GitHub. Before Phase 1, GitHub was the only implemented code-review Source, and a set of generic modules assumed it. Adding GitLab was therefore feasible without changing the domain model, but it was not a single plugin file: it took a new Source plus a bounded multi-forge change to deployment, credentials, review binding, resources and prompts.
 
 The recommendation is:
 
@@ -15,7 +25,7 @@ The recommendation is:
 - add an optional webhook receiver later, because GitLab has no complete notification inbox comparable to `gh api notifications`;
 - keep every GitLab write inside GitLab, and keep auto-merge off.
 
-GitLab can play two roles: the Source that receives requests, and the code host that workers clone and open Merge Requests against. Most teams want both, and this proposal delivers both together. A hybrid — GitHub or Feishu for requests, GitLab only as the code host — is a deployment variant of the same work: the GitLab account and prepare variables must be available even when the GitLab Source is switched off. Section 8 treats that as a condition on the deployment change, not as a separate Source.
+GitLab can play two roles: the Source that receives requests, and the code host that workers clone and open Merge Requests against. Most teams want both, and Phase 1 delivers both together. A hybrid — GitHub or Feishu for requests, GitLab only as the code host — is a deployment variant of the same work: the GitLab account and prepare variables must be available even when the GitLab Source is switched off. Section 8 treats that as a condition on the deployment change, not as a separate Source.
 
 Approximate size: roughly 1,000–1,500 lines of new Source code, plus tests and docs, and 800–1,200 lines of changes in generic modules, prompts and configuration. A first end-to-end version is a multi-day effort, not a small ticket; a GitLab-only installation additionally requires lifting the assumption that the deployment always has a GitHub account.
 
@@ -34,9 +44,9 @@ The extension seam is documented in [008 Cookbook](008-cookbook.md), and the Git
 
 The domain work is therefore mostly translation, not new concepts.
 
-## 2. What is GitHub-specific today
+## 2. What was GitHub-specific before Phase 1
 
-The code index in [007 Architecture](007-architecture.md) names these couplings; this proposal needs to address each one.
+The code index in [007 Architecture](007-architecture.md) names these couplings; Phase 1 addressed each one.
 
 | Area | Current code | Consequence for GitLab |
 | --- | --- | --- |
