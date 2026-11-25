@@ -89,11 +89,10 @@ export function subjectTrigger(kind: GitlabKind, subject: GitlabIssue | GitlabMe
   const who = actor ?? subject.author
   // Use the event or to-do id when there is one, so a later re-assignment is a new Trigger; an opened subject falls back to its creation time.
   const identity = ref !== undefined ? String(ref) : action === 'opened' ? subject.created_at : subject.updated_at ?? subject.created_at
-  const self = own && who.username === agent
   return { id: key('gitlab-subject', `${kind}:${iid}:${action}:${who.username}`, identity), source: SOURCE,
-    threads: [gitlabRef(kind, iid)], ...author(who, agent, self), at: subject.updated_at ?? subject.created_at,
+    threads: [gitlabRef(kind, iid)], ...author(who, agent, own), at: subject.updated_at ?? subject.created_at,
     text: action === 'opened' ? opened(kind, iid, subject, who) : assigned(kind, iid, subject, who),
-    ...action === 'assigned' || self ? { addressed: 'direct' as const }
+    ...action === 'assigned' ? { addressed: 'direct' as const }
       : mentions(`${subject.title}\n${subject.description ?? ''}`, agent) ? { addressed: 'mention' as const } : {},
     channel: gitlabChannel(kind, iid), url: subject.web_url || gitlabPage(deployment, kind, iid),
     meta: { kind, iid, author: who.username, title: title(subject.title), action } }
@@ -102,10 +101,9 @@ export function subjectTrigger(kind: GitlabKind, subject: GitlabIssue | GitlabMe
 export function noteTrigger(kind: GitlabKind, iid: number, note: GitlabNote, subject: { title: string; web_url: string }, agent: string,
   discussion?: string, own = false): Trigger {
   const url = `${subject.web_url}#note_${note.id}`
-  const self = own && note.author.username === agent
   return { id: key('gitlab-note', `${kind}:${iid}`, String(note.id)), source: SOURCE, threads: [gitlabRef(kind, iid)],
-    ...author(note.author, agent, self), at: note.created_at, text: note.body, channel: gitlabChannel(kind, iid, discussion), url,
-    ...self || mentions(note.body, agent) ? { addressed: self ? 'direct' as const : 'mention' as const } : {},
+    ...author(note.author, agent, own), at: note.created_at, text: note.body, channel: gitlabChannel(kind, iid, discussion), url,
+    ...mentions(note.body, agent) ? { addressed: 'mention' as const } : {},
     meta: { kind, iid, noteId: note.id, discussionId: discussion, author: note.author.username, title: title(subject.title) } }
 }
 /** Builds a Trigger from a project event that carries an Issue, Merge Request or Note. */

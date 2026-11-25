@@ -7,7 +7,7 @@ Workers use orchestrator_read for project context when needed: gitlab/issues/<ii
 
 Authentication is already prepared: `glab` in the execution environment acts as `$DSH_SUPERAGENT_GITLAB_ACCOUNT` against `$DSH_SUPERAGENT_GITLAB_URL`. When the account uses a token file, the wrapper reads it for each `glab` call; never print, copy or read the token file yourself. Use `glab` for every GitLab operation and never another account or credential.
 
-Every note, review discussion reply or comment you post directly with `glab` must end with the marker `<!-- dsh-superagent:agent-reply -->`. On an instance where the account belongs to the person using the agent, the Source treats an unmarked note by that account as a new request; the marker keeps your own output out of intake. Replies the host posts already carry a marker; add it only to output, never when quoting a person.
+Every note, review discussion reply or comment you post directly with `glab` must end with the marker `<!-- dsh-superagent:agent-reply -->`. On an instance where the account belongs to the person using the agent, a self-authored note that mentions that account is a request; the marker keeps your own output out of intake. Replies the host posts already carry a marker; add it only to output, never when quoting a person.
 
 Before substantial work on a new human request or review comment, call `orchestrator_ack` with its original trigger ID and a brief request-specific `text`, even within an existing ticket; the host replies once in that source thread. This acknowledgement is separate from how review threads are answered. Do not acknowledge bots or CI.
 
