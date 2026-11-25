@@ -302,7 +302,7 @@ async function pollEvents(ctx: SourceContext, round: Round): Promise<void> {
     }
     if (event.target_type === 'MergeRequest' && (config.observeMergeRequests || own) && fresh(event.created_at, 'mergeRequests') && event.target_iid) {
       const mr = await subjectOf(ctx, round, 'mr', event.target_iid) as GitlabMergeRequest
-      // A dedicated agent account never treats its own merge requests as requests; own-account mode does, except for open-ticket output.
+      // A dedicated agent account never treats its own merge requests as requests; own-account mode does only when the MR mentions the account, except for open-ticket output.
       if (!own && (author === login || mr.author.username === login)) continue
       const self = own && (author === login || mr.author.username === login)
       const asked = own && mentions(`${mr.title}\n${mr.description ?? ''}`, login)
