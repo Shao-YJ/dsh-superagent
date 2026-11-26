@@ -12,7 +12,7 @@ import { gitlabReview } from '../src/sources/gitlab-review.ts'
 import { reviewEndNotices } from '../src/app/reviews.ts'
 import { reviewOfThread, REVIEW_THREAD } from '../src/sources/review.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
-import { SettingsSchema } from '../src/policy.ts'
+import { settingsPolicy, SettingsSchema } from '../src/policy.ts'
 import { environmentOf } from '../src/app/execution-environment.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 
@@ -124,7 +124,7 @@ describe('GitLab polling', () => {
     expect(store.get('gitlab-cursor:gitlab:mr:7')).toEqual(expect.any(String))
     expect(patches.some(([key, meta]) => key === 'gitlab:mr:7' && meta.title === 'Add support')).toBe(true)
   })
-  it('accepts only mentions of the monitored account in own-account mode, including its own mentions', async () => {
+  it("accepts unaddressed content as inferred candidates in own-account mode, but not its marked output", async () => {
     const received: Trigger[] = []
     const at = new Date(Date.now() + 3_600_000).toISOString()
     const issue = (iid: number, description: string) => ({ id: 80 + iid, iid, title: 'Bug', description, state: 'opened',
@@ -164,11 +164,35 @@ describe('GitLab polling', () => {
     const context = fakeContext({ commands, received,
       config: { ownAccount: true, observeIssues: false, observeMergeRequests: false, observeComments: false } })
     await pollRound(context)
-    expect(received).toHaveLength(3)
-    expect(received[0]).toMatchObject({ meta: { kind: 'issue', iid: 9 }, human: true, addressed: 'mention' })
-    expect(received[1]).toMatchObject({ meta: { kind: 'mr', noteId: 58 }, human: true, addressed: 'mention' })
-    expect(received[2]).toMatchObject({ meta: { kind: 'mr', noteId: 59 }, human: true, addressed: 'mention' })
-    expect(received.some(trigger => trigger.meta.noteId === 60)).toBe(false)
+    expect(received).toHaveLength(6)
+    expect(received[0]).toMatchObject({ meta: { kind: 'issue', iid: 8 }, human: true })
+    expect(received[0]).not.toHaveProperty('addressed')
+    expect(received[1]).toMatchObject({ meta: { kind: 'issue', iid: 9 }, human: true, addressed: 'mention' })
+    expect(received[2]).toMatchObject({ meta: { kind: 'mr', noteId: 56 }, human: true })
+    expect(received[2]).not.toHaveProperty('addressed')
+    expect(received[3]).toMatchObject({ meta: { kind: 'mr', noteId: 58 }, human: true, addressed: 'mention' })
+    expect(received[4]).toMatchObject({ meta: { kind: 'mr', noteId: 59 }, human: true, addressed: 'mention' })
+    expect(received[5]).toMatchObject({ meta: { kind: 'mr', noteId: 60 }, human: true })
+    expect(received[5]).not.toHaveProperty('addressed')
+    expect(received.some(trigger => trigger.meta.noteId === 57)).toBe(false)
+  })
+  it('admits an unmentioned own-account note as an inferred candidate through the admission table', () => {
+    const settings = SettingsSchema.parse({
+      eval: { mode: 'auto' },
+      sources: { gitlab: { enabled: true, config: { baseUrl: 'https://gitlab.example.com', project: 'team/app', cli: '/bin/false', ownAccount: true } } },
+      policy: { sources: { gitlab: { allowed: [{ id: 'agent-bot' }] } } },
+    })
+    const sources = new SourceRegistry(() => settings)
+    sources.register(gitlabKind)
+    const policy = settingsPolicy(settings, sources)
+    const inference = noteTrigger('mr', 7, note(56, 'agent-bot', 'please fix'), MR, 'agent-bot', undefined, true)
+    expect(policy.gate(inference, { key: 'gitlab:mr:7', ref: { source: 'gitlab', id: 'mr:7' }, createdAt: '', subscriptions: [],
+      correlated: [], pending: [], meta: {} }, [])).toMatchObject({
+      admissible: true, strength: 'inferred', basis: { via: 'admission', cell: 'listedUnaddressed', row: 'comments' },
+    })
+    const explicit = noteTrigger('mr', 7, note(58, 'agent-bot', '@agent-bot please fix'), MR, 'agent-bot', undefined, true)
+    expect(policy.gate(explicit, { key: 'gitlab:mr:7', ref: { source: 'gitlab', id: 'mr:7' }, createdAt: '', subscriptions: [],
+      correlated: [], pending: [], meta: {} }, [])).toMatchObject({ admissible: true, strength: 'explicit', basis: { via: 'addressed' } })
   })
   it('binds an MR that is the ticket origin, refuses a foreign one, and reports its merge only to non-GitLab channels', () => {
     const bound: [string, string, boolean][] = []

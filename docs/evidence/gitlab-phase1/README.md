@@ -10,8 +10,8 @@ private Feishu content appears.
 - **Plugin config** — `Plugins > Superagent > Configure`: the Before page has no GitLab row; the After page shows the GitLab
   instance and commit email beside the repository and agent account.
 - **Sources** — `Superagent > Settings > Sources`: the Before page shows GitLab as "Plugin not installed" while its saved
-  configuration is retained; the After page shows the GitLab Source card with its project, account, token-file check and
-  observation switches.
+  configuration is retained; the After page shows the GitLab Source card with its project, account, token-file check,
+  own-account switch and its hint that unmentioned content becomes inferred candidates.
 
 The screenshots were captured with Playwright/Chromium against the running applications. They are evidence for the UI
 change only; they do not demonstrate live GitLab API behaviour.
